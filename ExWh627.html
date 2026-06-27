@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Exposure Wheel</title>
+
+<!-- Make it installable as a home-screen app on iPad/iPhone -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Exposure Wheel" />
+
+<!-- Tailwind (for the utility classes used in the component) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" />
+
+<!-- React + Babel (lets the browser run JSX directly, no build step) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #E8EAED; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useCallback } = React;
+
+/* ------------------------------------------------------------------ *
+ *  Exposure Wheel — after the Cullen Exposure Wheel.
+ *
+ *  40 major (full-stop) ticks, each split into thirds (120 ticks total),
+ *  evenly spaced around the whole dial. Only two opposing 9-tick arcs
+ *  carry printed text:
+ *    Arc A (top)    -> Aperture (outer ring) <-> Shutter (inner ring)
+ *    Arc B (bottom) -> ISO (outer ring)      <-> EV (inner ring)
+ *  The printed numbers are fixed engravings - what changes as you spin
+ *  is which engraved values are radially paired, computed live.
+ *  Only the outer ring turns; the inner ring is fixed.
+ * ------------------------------------------------------------------ */
+
+const C = {
+  ink:    "#FFFFFF",
+  face:   "#F4F5F6",
+  band:   "#E4E6E9",
+  silver: "#3A4A5C",   // aperture
+  brass:  "#A0720A",   // shutter
+  ev:     "#2D6A4F",   // EV
+  iso:    "#6B21A8",   // ISO
+  muted:  "#6B7280",
+  faint:  "#D1D5DB",
+};
+
+const MONO = "'Courier New', monospace";
+const SANS = "system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif";
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const log2 = (x) => Math.log(x) / Math.LN2;
+const polar = (r, deg) => {
+  const a = (deg * Math.PI) / 180;
+  return [r * Math.cos(a), r * Math.sin(a)];
+};
+
+// ---- the wheel: 40 full-stop major ticks (9° apart), thirds in between ----
+const TICK_COUNT = 40;
+const DEG_STEP = 360 / TICK_COUNT;       // 9° per full stop
+const FINE_PER_STOP = 3;
+const FINE_DEG_STEP = DEG_STEP / FINE_PER_STOP; // 3° per 1/3 stop
+
+// Arc A: aperture <-> shutter, paired tick-for-tick, all the same EV (~14)
+// shifted so "250" (and its paired aperture, 8) sits at physical tick 0 — the top
+const ARC_A = [36, 37, 38, 39, 0, 1, 2, 3, 4];
+const AP_VALUES = [2, 2.8, 4, 5.6, 8, 11, 16, 22, 32];
+const SH_VALUES = ["4000", "2000", "1000", "500", "250", "125", "60", "30", "15"];
+const SH_DENOM_BASE = Array.from({ length: 9 }, (_, i) => 4000 / Math.pow(2, i));
+
+// Arc B: ISO <-> EV, paired tick-for-tick, opposite side of the wheel (shifted the same -4)
+const ARC_B = [16, 17, 18, 19, 20, 21, 22, 23, 24];
+const ISO_VALUES = [50, 100, 200, 400, 800, 1600, 3200, 6400, 12800];
+const EV_VALUES  = [15, 14, 13, 12, 11, 10, 9, 8, 7];
+
+// the standard EV / Light-Value guide, as printed on most exposure calculators
+const EV_DESC = {
+  15: "Bright Sun", 14: "Hazy Sun", 13: "Cloudy Bright", 12: "Cloudy Dull",
+  11: "Open Shade / Sunset", 10: "Heavy Overcast", 9: "Twilight",
+  8: "Deep Twilight", 7: "Night (lit street)",
+};
+function evDescFor(v) {
+  const base = Math.floor(v + 1e-6);
+  const third = Math.round((v - base) * 3);
+  const baseDesc = EV_DESC[base] ?? "";
+  return third > 0 ? `${baseDesc} ${"+".repeat(third)}` : baseDesc;
+}
+
+// standard shutter denominators, for snapping computed values to a "nice" number
+const STD_DEN = [4000,3200,2500,2000,1600,1250,1000,800,640,500,400,320,250,200,
+                 160,125,100,80,60,50,40,30,25,20,15,13,10,8,6,5,4,3,2,1];
+function nearestStdDenom(raw) {
+  let best = STD_DEN[0];
+  for (const d of STD_DEN) if (Math.abs(log2(d) - log2(raw)) < Math.abs(log2(best) - log2(raw))) best = d;
+  return best;
+}
+
+// the standard third-stop ISO progression — 25 values spanning 50 to 12800,
+// the same way the EV slider has 25 third-stop positions spanning 7 to 15
+const ISO_FINE_VALUES = [50,64,80,100,125,160,200,250,320,400,500,640,800,1000,
+                         1250,1600,2000,2500,3200,4000,5000,6400,8000,10000,12800];
+
+// snap a raw ISO value to the nearest entry in ISO_FINE_VALUES (log-distance)
+function nearestIsoFineValue(raw) {
+  let best = ISO_FINE_VALUES[0];
+  for (const v of ISO_FINE_VALUES) {
+    if (Math.abs(log2(v) - log2(raw)) < Math.abs(log2(best) - log2(raw))) best = v;
+  }
+  return best;
+}
+
+// ---- live pairing math: rotating the outer ring by apSelFine fine-ticks
+// shifts every Arc A / Arc B pairing by the same fractional-stop amount ----
+const stopsOffset = (apSelFine) => apSelFine / FINE_PER_STOP;
+const evLiveAt = (apSelFine) => 14 + stopsOffset(apSelFine);
+const pairedShutterDenom = (i, apSelFine) => SH_DENOM_BASE[i] * Math.pow(2, stopsOffset(apSelFine));
+
+// ---- a ring of 40 full-stop ticks (plus thirds), with labels on a subset ----
+function Ring({ rot, rTickIn, rTickOut, rLabel, tickColor, labels, dragging, markDir = 1 }) {
+  const items = [];
+
+  items.push(
+    <circle key="band" r={(rTickIn + rTickOut) / 2} fill="none"
+      stroke={tickColor} strokeOpacity={0.06} strokeWidth={rTickOut - rTickIn} />
+  );
+
+  const fineCount = TICK_COUNT * FINE_PER_STOP;
+  for (let k = 0; k < fineCount; k++) {
+    const major = k % FINE_PER_STOP === 0;
+    const deg = k * FINE_DEG_STEP - 90;
+    const outerR = rTickOut;
+    const innerR = major ? rTickIn : rTickIn + (rTickOut - rTickIn) * 0.45;
+    const [x1, y1] = polar(innerR, deg);
+    const [x2, y2] = polar(outerR, deg);
+    items.push(
+      <line key={`t${k}`} x1={x1} y1={y1} x2={x2} y2={y2}
+        stroke={tickColor} strokeWidth={major ? 2 : 1} strokeOpacity={major ? 0.85 : 0.4} strokeLinecap="round" />
+    );
+  }
+
+  for (const { idx, text, color, mark, rLabelOverride } of labels) {
+    const deg = idx * DEG_STEP - 90;
+    const [x, y] = polar(rLabelOverride ?? rLabel, deg);
+    const normDeg = ((deg % 360) + 360) % 360;
+    const flip = normDeg > 0 && normDeg < 180; // bottom half — flip so text isn't upside down
+    items.push(
+      <text key={`l${idx}`} x={x} y={y}
+        textAnchor="middle" dominantBaseline="middle"
+        transform={`rotate(${deg + 90 + (flip ? 180 : 0)}, ${x}, ${y})`}
+        style={{ fill: color, font: `600 10px ${MONO}`, userSelect: "none" }}>
+        {text}
+      </text>
+    );
+    if (mark) {
+      const [dx, dy] = polar((rLabelOverride ?? rLabel) + markDir * 9, deg);
+      items.push(<circle key={`m${idx}`} cx={dx} cy={dy} r={3} fill="#E2483D" />);
+    }
+  }
+
+  return (
+    <g style={{ transition: dragging ? "none" : "transform .28s cubic-bezier(.22,1,.36,1)" }}
+       transform={`rotate(${rot})`}>
+      {items}
+    </g>
+  );
+}
+
+function ScalePill({ color, label }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4,
+      background: color + "18", border: `1px solid ${color}55`,
+      borderRadius: 999, padding: "2px 8px",
+      color, font: `600 10px ${SANS}`, letterSpacing: ".14em",
+    }}>
+      {label}
+    </span>
+  );
+}
+
+// Rotation limits, in 1/3-stop fine-ticks: the outer ring may only turn far
+// enough that Arc A's aperture values still pair with Arc A's own shutter
+// values — from "2 over 15" one way to "32 over 4000" the other. That's
+// +/-8 full stops, i.e. +/-24 fine-ticks.
+const ROT_MIN = -24;
+const ROT_MAX = 24;
+
+function ExposureWheel() {
+  const [apSel, setApSel] = useState(0); // fine-ticks; 0 = 8 over 250, 250 at the top
+  const [isoSel, setIsoSel] = useState(100);
+  const [evSel, setEvSel] = useState(14);
+  const [evLocked, setEvLocked] = useState(false); // when true, EV is held fixed — only ISO/aperture/shutter move
+  const [pairIndex, setPairIndex] = useState(4); // which Arc A pair the windows show
+  const [drag, setDrag] = useState(null);
+  const dragRef = useRef(null);
+  const evSelRef = useRef(evSel);
+  const svgRef = useRef(null);
+
+  // keep evSelRef in sync so the up handler can read the latest evSel
+  evSelRef.current = evSel;
+
+  // When the wheel turns: EV stays fixed, ISO changes to match.
+  // If ISO would go out of range: normally we nudge EV to compensate;
+  // but if EV is locked, ISO simply clamps at the boundary instead.
+  const syncSliders = useCallback((newApSel, currentEvSel, locked) => {
+    const isoRaw = 50 * Math.pow(2, 15 - currentEvSel + newApSel / FINE_PER_STOP);
+    if (isoRaw < ISO_FINE_VALUES[0]) {
+      if (!locked) {
+        const newEv = 15 + newApSel / FINE_PER_STOP;
+        setEvSel(clamp(Math.round(newEv * FINE_PER_STOP) / FINE_PER_STOP, 7, 15));
+      }
+      setIsoSel(ISO_FINE_VALUES[0]);
+    } else if (isoRaw > ISO_FINE_VALUES[ISO_FINE_VALUES.length - 1]) {
+      if (!locked) {
+        const newEv = 7 + newApSel / FINE_PER_STOP;
+        setEvSel(clamp(Math.round(newEv * FINE_PER_STOP) / FINE_PER_STOP, 7, 15));
+      }
+      setIsoSel(ISO_FINE_VALUES[ISO_FINE_VALUES.length - 1]);
+    } else {
+      setIsoSel(nearestIsoFineValue(isoRaw));
+    }
+  }, []);
+
+  const angleAt = useCallback((e) => {
+    const r = svgRef.current.getBoundingClientRect();
+    return (Math.atan2(
+      e.clientY - (r.top + r.height / 2),
+      e.clientX - (r.left + r.width / 2),
+    ) * 180) / Math.PI;
+  }, []);
+
+  const commit = useCallback((raw) => {
+    setApSel(clamp(raw, ROT_MIN, ROT_MAX));
+  }, []);
+
+  // EV + ISO: rotate the wheel so the chosen ISO reads the chosen EV.
+  const homeEvForIso = (iso) => EV_VALUES[0] - log2(iso / ISO_VALUES[0]);
+  const applyEvIso = useCallback((ev, iso) => {
+    commit(Math.round(FINE_PER_STOP * (ev - homeEvForIso(iso))));
+  }, [commit]);
+  const pickEv = (v) => { setEvSel(v); applyEvIso(v, isoSel); };
+  const pickIso = (v) => { setIsoSel(v); applyEvIso(evSel, v); };
+
+  // EV slider
+  const EV_MIN = Math.min(...EV_VALUES);
+  const EV_MAX = Math.max(...EV_VALUES);
+  const sliderRef = useRef(null);
+  const [sliderDrag, setSliderDrag] = useState(false);
+  const [sliderRawFrac, setSliderRawFrac] = useState((evSel - EV_MIN) / (EV_MAX - EV_MIN));
+  const THUMB_INSET = 22;
+  const fracFromPointer = useCallback((e) => {
+    const r = sliderRef.current.getBoundingClientRect();
+    const usable = Math.max(1, r.width - THUMB_INSET * 2);
+    return clamp((e.clientX - r.left - THUMB_INSET) / usable, 0, 1);
+  }, []);
+  const thumbDown = (e) => {
+    if (evLocked) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    setSliderDrag(true);
+    setSliderRawFrac((evSel - EV_MIN) / (EV_MAX - EV_MIN));
+  };
+  const sliderMove = (e) => {
+    if (evLocked || !sliderDrag) return;
+    const frac = fracFromPointer(e);
+    setSliderRawFrac(frac);
+    const raw = EV_MIN + frac * (EV_MAX - EV_MIN);
+    pickEv(Math.round(raw * FINE_PER_STOP) / FINE_PER_STOP);
+  };
+  const sliderUp = () => setSliderDrag(false);
+
+  // ISO slider — reversed: 12800 on the left, 50 on the right
+  const isoSliderRef = useRef(null);
+  const [isoSliderDrag, setIsoSliderDrag] = useState(false);
+  const isoFracOf = (v) => 1 - ISO_FINE_VALUES.indexOf(v) / (ISO_FINE_VALUES.length - 1);
+  const [isoSliderRawFrac, setIsoSliderRawFrac] = useState(isoFracOf(isoSel));
+  const isoFracFromPointer = useCallback((e) => {
+    const r = isoSliderRef.current.getBoundingClientRect();
+    const usable = Math.max(1, r.width - THUMB_INSET * 2);
+    return clamp((e.clientX - r.left - THUMB_INSET) / usable, 0, 1);
+  }, []);
+  const isoThumbDown = (e) => {
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    setIsoSliderDrag(true);
+    setIsoSliderRawFrac(isoFracOf(isoSel));
+  };
+  const isoSliderMove = (e) => {
+    if (!isoSliderDrag) return;
+    const frac = isoFracFromPointer(e);
+    setIsoSliderRawFrac(frac);
+    // frac=0 is 12800 (high ISO, left), frac=1 is 50 (low ISO, right)
+    const k = Math.round((1 - frac) * (ISO_FINE_VALUES.length - 1));
+    pickIso(ISO_FINE_VALUES[k]);
+  };
+  const isoSliderUp = () => setIsoSliderDrag(false);
+
+  // Wheel drag handlers — use dragRef to avoid stale closure in move
+  const down = (e) => {
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const d = { startAng: angleAt(e), rot: -apSel * FINE_DEG_STEP, startRot: -apSel * FINE_DEG_STEP };
+    dragRef.current = d;
+    setDrag(d);
+  };
+  const move = (e) => {
+    if (!dragRef.current) return;
+    const newRot = clamp(
+      dragRef.current.startRot + (angleAt(e) - dragRef.current.startAng),
+      -ROT_MAX * FINE_DEG_STEP,
+      -ROT_MIN * FINE_DEG_STEP,
+    );
+    const updated = { ...dragRef.current, rot: newRot };
+    dragRef.current = updated;
+    setDrag(updated);
+  };
+  const up = () => {
+    if (!dragRef.current) return;
+    const newApSel = clamp(Math.round(-dragRef.current.rot / FINE_DEG_STEP), ROT_MIN, ROT_MAX);
+    setApSel(newApSel);
+    syncSliders(newApSel, evSelRef.current, evLocked);
+    dragRef.current = null;
+    setDrag(null);
+  };
+
+  const apRot = drag ? drag.rot : -apSel * FINE_DEG_STEP;
+
+  // outer ring: aperture (Arc A, top) + ISO (Arc B, bottom)
+  // per-label radius overrides: top labels slightly inward, bottom labels slightly outward
+  const outerLabels = [
+    ...ARC_A.map((idx, i) => ({ idx, text: String(AP_VALUES[i]), color: C.silver, mark: AP_VALUES[i] === 16, rLabelOverride: 225 })),
+    ...ARC_B.map((idx, i) => ({ idx, text: String(ISO_VALUES[i]), color: C.iso, mark: ISO_VALUES[i] === 100, rLabelOverride: 226 })),
+  ];
+  // inner ring: shutter (Arc A) + EV (Arc B), fixed
+  const innerLabels = [
+    ...ARC_A.map((idx, i) => ({ idx, text: SH_VALUES[i], color: C.brass, mark: SH_VALUES[i] === "125" })),
+    ...ARC_B.map((idx, i) => ({ idx, text: String(EV_VALUES[i]), color: C.ev, mark: EV_VALUES[i] === 15 })),
+  ];
+
+  // whatever printed label is currently at the top of the (rotating) outer ring
+  const onFullStop = apSel % FINE_PER_STOP === 0;
+  const top = onFullStop ? (((apSel / FINE_PER_STOP) % TICK_COUNT) + TICK_COUNT) % TICK_COUNT : null;
+  const topLabel = top !== null ? outerLabels.find((l) => l.idx === top) : undefined;
+
+  // the two windows: one of the 9 aperture/shutter pairs currently equivalent on the wheel
+  const winAperture = AP_VALUES[pairIndex];
+  const winShutter = nearestStdDenom(pairedShutterDenom(pairIndex, apSel));
+  const stepPair = (d) => setPairIndex((p) => clamp(p + d, 0, ARC_A.length - 1));
+
+  return (
+    <div className="min-h-screen w-full flex justify-center py-8"
+      style={{ background: `radial-gradient(120% 90% at 50% 0%, #FFFFFF 0%, #E8EAED 70%)`,
+               paddingLeft: "0.125in", paddingRight: "0.125in" }}>
+      <div className="w-full" style={{ maxWidth: 900 }}>
+
+        <div className="mb-4">
+          <div style={{ color: C.brass, font: `600 10px ${SANS}`, letterSpacing: ".3em" }}>
+            RECIPROCITY · THIRD-STOP TICKS
+          </div>
+          <h1 style={{ color: "#111827", font: `600 24px ${SANS}`, letterSpacing: "-.01em" }}>
+            Exposure Wheel
+          </h1>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          <ScalePill color={C.silver} label="APERTURE" />
+          <ScalePill color={C.brass}  label="SHUTTER" />
+          <ScalePill color={C.iso}    label="ISO" />
+          <ScalePill color={C.ev}     label="EV" />
+        </div>
+
+        <div className="relative select-none mx-auto" style={{ touchAction: "none", width: "min(100%, 85vh)" }}>
+          <svg ref={svgRef} viewBox="-240 -240 480 480" width="100%"
+            onPointerMove={move} onPointerUp={up} onPointerLeave={up} onPointerCancel={up}
+            style={{ display: "block", filter: "drop-shadow(0 12px 32px rgba(0,0,0,.18))" }}>
+
+            <circle r={232} fill={C.ink} stroke={C.faint} strokeWidth={1} />
+
+            {/* hit zone - only the outer ring turns */}
+            <circle r={216} fill="transparent" stroke="transparent" strokeWidth={70}
+              style={{ cursor: "grab" }} onPointerDown={down} />
+
+            {/* outer ring: aperture + ISO, rotates */}
+            <Ring rot={apRot} rTickIn={206} rTickOut={220} rLabel={225}
+              tickColor={C.silver} labels={outerLabels} dragging={!!drag} markDir={1} />
+
+            <circle r={206} fill="none" stroke={C.faint} strokeOpacity={0.8} strokeWidth={1} />
+
+            {/* inner ring: shutter + EV, fixed */}
+            <Ring rot={0} rTickIn={192} rTickOut={206} rLabel={183}
+              tickColor={C.brass} labels={innerLabels} dragging={false} markDir={-1} />
+
+            <circle r={98} fill="none" stroke={C.faint} strokeOpacity={0.8} strokeWidth={1} />
+
+            <circle r={97} fill="url(#hub)" stroke={C.faint} strokeWidth={1} />
+            <defs>
+              <radialGradient id="hub" cx="50%" cy="38%" r="75%">
+                <stop offset="0%" stopColor="#FFFFFF" />
+                <stop offset="100%" stopColor={C.face} />
+              </radialGradient>
+            </defs>
+
+            {/* Hub: shows EV and ISO from the sliders */}
+            <text x={0} y={-20} textAnchor="middle"
+              style={{ fill: C.ev, font: `700 34px ${MONO}` }}>
+              EV {Number.isInteger(evSel) ? evSel : evSel.toFixed(1)}
+            </text>
+            <text x={0} y={4} textAnchor="middle"
+              style={{ fill: C.ev, font: `600 11px ${SANS}`, letterSpacing: ".04em" }}>
+              {evDescFor(evSel)}
+            </text>
+            <text x={0} y={30} textAnchor="middle"
+              style={{ fill: C.iso, font: `700 26px ${MONO}` }}>
+              ISO {isoSel}
+            </text>
+          </svg>
+        </div>
+
+        <div className="flex items-center justify-between mt-4 rounded-2xl p-4"
+          style={{ background: C.ink, border: `1px solid ${C.faint}` }}>
+          <button onClick={() => { const n = clamp(apSel - 1, ROT_MIN, ROT_MAX); setApSel(n); syncSliders(n, evSel, evLocked); }} aria-label="rotate down"
+            className="w-10 h-10 rounded-full text-lg"
+            style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>−</button>
+          <div style={{ color: C.muted, font: `500 11px ${SANS}`, letterSpacing: ".08em" }}>
+            Spin the outer ring, 1/3 stop at a time
+          </div>
+          <button onClick={() => { const n = clamp(apSel + 1, ROT_MIN, ROT_MAX); setApSel(n); syncSliders(n, evSel, evLocked); }} aria-label="rotate up"
+            className="w-10 h-10 rounded-full text-lg"
+            style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>+</button>
+        </div>
+
+        <div className="mt-4">
+          <div className="flex justify-center mb-1">
+            <div className="rounded-xl px-4 py-1 text-center" style={{ background: C.face, border: `1px solid ${C.faint}` }}>
+              <span style={{ color: C.ev, font: `600 12px ${MONO}` }}>
+                {Number.isInteger(evSel) ? evSel : evSel.toFixed(1)}
+              </span>
+              <div style={{ color: C.muted, font: `600 10px ${SANS}`, letterSpacing: ".04em" }}>
+                {evDescFor(evSel)}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between mb-1">
+            <span style={{ color: C.muted, font: `600 11px ${SANS}`, letterSpacing: ".18em" }}>
+              SET EV
+            </span>
+            <button
+              onClick={() => setEvLocked((l) => !l)}
+              aria-label={evLocked ? "unlock EV" : "lock EV"}
+              className="rounded-full px-3 py-1 flex items-center gap-1"
+              style={{
+                background: evLocked ? C.ev : C.face,
+                border: `1px solid ${evLocked ? C.ev : C.faint}`,
+                color: evLocked ? C.ink : C.muted,
+                font: `700 10px ${SANS}`, letterSpacing: ".1em",
+                cursor: "pointer",
+              }}>
+              <span style={{ fontSize: 12, lineHeight: 1 }}>{evLocked ? "🔒" : "🔓"}</span>
+              {evLocked ? "LOCKED" : "LOCK EV"}
+            </button>
+          </div>
+          {evLocked && (
+            <div style={{ color: C.ev, font: `500 10px ${SANS}` }} className="mb-1">
+              EV held at {Number.isInteger(evSel) ? evSel : evSel.toFixed(1)} — adjust ISO, the wheel, or the aperture/shutter steppers to see equivalent exposures.
+            </div>
+          )}
+
+          <div className="relative mb-1" style={{ height: 44 }}>
+            <div ref={sliderRef} className="relative w-full"
+              style={{ height: 44 }}
+              onPointerMove={sliderMove} onPointerUp={sliderUp}
+              onPointerLeave={sliderUp} onPointerCancel={sliderUp}>
+              <div className="absolute rounded-full" style={{
+                top: "50%", left: THUMB_INSET, right: THUMB_INSET, height: 14, transform: "translateY(-50%)",
+                background: C.band, border: `1px solid ${C.faint}`, pointerEvents: "none",
+              }} />
+              {Array.from({ length: (EV_MAX - EV_MIN) * 3 + 1 }, (_, k) => EV_MIN + k / 3)
+                .filter((v) => !Number.isInteger(v))
+                .map((v) => {
+                  const active = Math.abs(v - evSel) < 0.01;
+                  return (
+                    <div key={v} className="absolute rounded-full" style={{
+                      top: "50%", width: active ? 2 : 1.5, height: active ? 12 : 9,
+                      left: `calc(${THUMB_INSET}px + (100% - ${THUMB_INSET * 2}px) * ${(v - EV_MIN) / (EV_MAX - EV_MIN)})`,
+                      transform: "translate(-50%, -50%)",
+                      background: active ? C.ink : C.muted, opacity: active ? 0.8 : 0.3, pointerEvents: "none",
+                    }} />
+                  );
+                })}
+              {EV_VALUES.map((v) => (
+                <div key={v} className="absolute rounded-full" style={{
+                  top: "50%", width: 3, height: 18,
+                  left: `calc(${THUMB_INSET}px + (100% - ${THUMB_INSET * 2}px) * ${(v - EV_MIN) / (EV_MAX - EV_MIN)})`,
+                  transform: "translate(-50%, -50%)",
+                  background: Math.abs(v - evSel) < 0.01 ? C.ink : C.muted,
+                  opacity: Math.abs(v - evSel) < 0.01 ? 0.9 : 0.45, pointerEvents: "none",
+                }} />
+              ))}
+              <div
+                onPointerDown={thumbDown}
+                className="absolute rounded-full"
+                style={{
+                  top: "50%", width: 44, height: 44,
+                  left: `calc(${THUMB_INSET}px + (100% - ${THUMB_INSET * 2}px) * ${sliderDrag ? sliderRawFrac : (evSel - EV_MIN) / (EV_MAX - EV_MIN)})`,
+                  transform: "translate(-50%, -50%)",
+                  transition: sliderDrag ? "none" : "left .15s ease",
+                  touchAction: "none", cursor: evLocked ? "not-allowed" : "grab",
+                  opacity: evLocked ? 0.55 : 1,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                <div className="rounded-full" style={{
+                  width: 34, height: 34,
+                  background: evLocked ? C.muted : C.ev, border: `3px solid ${C.ink}`,
+                  boxShadow: "0 2px 6px rgba(0,0,0,.3)", pointerEvents: "none",
+                }} />
+              </div>
+            </div>
+          </div>
+          <div className="relative mb-2" style={{ height: 16, marginTop: -8 }}>
+            <span className="absolute" style={{
+              left: THUMB_INSET, transform: "translateX(-50%)",
+              color: C.ev, font: `italic 600 13px Georgia, 'Times New Roman', serif`,
+            }}>{EV_MIN}</span>
+            <span className="absolute" style={{
+              right: THUMB_INSET, transform: "translateX(50%)",
+              color: C.ev, font: `italic 600 13px Georgia, 'Times New Roman', serif`,
+            }}>{EV_MAX}</span>
+          </div>
+
+          <div className="flex justify-center mb-1">
+            <div className="rounded-xl px-4 py-1 text-center" style={{ background: C.face, border: `1px solid ${C.faint}` }}>
+              <span style={{ color: C.iso, font: `600 12px ${MONO}` }}>{isoSel}</span>
+            </div>
+          </div>
+
+          <div style={{ color: C.muted, font: `600 11px ${SANS}`, letterSpacing: ".18em" }} className="mb-1">
+            SET ISO
+          </div>
+
+          <div className="relative mb-1" style={{ height: 44 }}>
+            <div ref={isoSliderRef} className="relative w-full"
+              style={{ height: 44 }}
+              onPointerMove={isoSliderMove} onPointerUp={isoSliderUp}
+              onPointerLeave={isoSliderUp} onPointerCancel={isoSliderUp}>
+              <div className="absolute rounded-full" style={{
+                top: "50%", left: THUMB_INSET, right: THUMB_INSET, height: 14, transform: "translateY(-50%)",
+                background: C.band, border: `1px solid ${C.faint}`, pointerEvents: "none",
+              }} />
+              {ISO_FINE_VALUES.map((v, k) => {
+                const major = ISO_VALUES.includes(v);
+                const active = v === isoSel;
+                const frac = 1 - k / (ISO_FINE_VALUES.length - 1); // reversed
+                return (
+                  <div key={v} className="absolute rounded-full" style={{
+                    top: "50%",
+                    width: major ? 3 : (active ? 2 : 1.5),
+                    height: major ? 18 : (active ? 12 : 9),
+                    left: `calc(${THUMB_INSET}px + (100% - ${THUMB_INSET * 2}px) * ${frac})`,
+                    transform: "translate(-50%, -50%)",
+                    background: active ? C.ink : C.muted,
+                    opacity: active ? (major ? 0.9 : 0.8) : (major ? 0.45 : 0.3),
+                    pointerEvents: "none",
+                  }} />
+                );
+              })}
+              <div
+                onPointerDown={isoThumbDown}
+                className="absolute rounded-full"
+                style={{
+                  top: "50%", width: 44, height: 44,
+                  left: `calc(${THUMB_INSET}px + (100% - ${THUMB_INSET * 2}px) * ${isoSliderDrag ? isoSliderRawFrac : isoFracOf(isoSel)})`,
+                  transform: "translate(-50%, -50%)",
+                  transition: isoSliderDrag ? "none" : "left .15s ease",
+                  touchAction: "none", cursor: "grab",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                <div className="rounded-full" style={{
+                  width: 34, height: 34,
+                  background: C.iso, border: `3px solid ${C.ink}`,
+                  boxShadow: "0 2px 6px rgba(0,0,0,.3)", pointerEvents: "none",
+                }} />
+              </div>
+            </div>
+          </div>
+          <div className="relative mb-2" style={{ height: 16, marginTop: -8 }}>
+            <span className="absolute" style={{
+              left: THUMB_INSET, transform: "translateX(-50%)",
+              color: C.iso, font: `italic 600 13px Georgia, 'Times New Roman', serif`,
+            }}>{ISO_FINE_VALUES[ISO_FINE_VALUES.length - 1]}</span>
+            <span className="absolute" style={{
+              right: THUMB_INSET, transform: "translateX(50%)",
+              color: C.iso, font: `italic 600 13px Georgia, 'Times New Roman', serif`,
+            }}>{ISO_FINE_VALUES[0]}</span>
+          </div>
+        </div>
+
+        <div className="flex gap-3 mt-4">
+          <div className="flex-1 rounded-2xl p-4" style={{ background: C.ink, border: `1px solid ${C.faint}` }}>
+            <div style={{ color: C.muted, font: `600 10px ${SANS}`, letterSpacing: ".18em" }}>SHUTTER</div>
+            <div className="flex items-center justify-between mt-1.5">
+              <button onClick={() => stepPair(-1)} aria-label="shutter down"
+                className="w-9 h-9 rounded-full text-lg"
+                style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>−</button>
+              <span style={{ color: C.brass, font: `600 20px ${MONO}` }}>{winShutter}</span>
+              <button onClick={() => stepPair(1)} aria-label="shutter up"
+                className="w-9 h-9 rounded-full text-lg"
+                style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>+</button>
+            </div>
+          </div>
+          <div className="flex-1 rounded-2xl p-4" style={{ background: C.ink, border: `1px solid ${C.faint}` }}>
+            <div style={{ color: C.muted, font: `600 10px ${SANS}`, letterSpacing: ".18em" }}>APERTURE</div>
+            <div className="flex items-center justify-between mt-1.5">
+              <button onClick={() => stepPair(-1)} aria-label="aperture down"
+                className="w-9 h-9 rounded-full text-lg"
+                style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>−</button>
+              <span style={{ color: C.silver, font: `600 20px ${MONO}` }}>{winAperture}</span>
+              <button onClick={() => stepPair(1)} aria-label="aperture up"
+                className="w-9 h-9 rounded-full text-lg"
+                style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>+</button>
+            </div>
+          </div>
+        </div>
+
+        <p style={{ color: C.faint, font: `400 10px ${SANS}` }} className="mt-5 text-center">
+          After the Cullen Exposure Wheel — for Ted.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<ExposureWheel />);
+</script>
+</body>
+</html>
