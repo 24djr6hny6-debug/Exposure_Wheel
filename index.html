@@ -355,12 +355,13 @@ function ExposureWheel() {
   const stepPair = (d) => setPairIndex((p) => clamp(p + d, 0, ARC_A.length - 1));
 
   return (
-    <div className="min-h-screen w-full flex justify-center py-3"
-      style={{ background: `radial-gradient(120% 90% at 50% 0%, #FFFFFF 0%, #E8EAED 70%)`,
-               paddingLeft: "0.125in", paddingRight: "0.125in" }}>
-      <div className="w-full" style={{ maxWidth: 900 }}>
+    <div className="w-full flex justify-center"
+      style={{ height: "100dvh", overflowY: "auto",
+               background: `radial-gradient(120% 90% at 50% 0%, #FFFFFF 0%, #E8EAED 70%)`,
+               paddingLeft: "0.125in", paddingRight: "0.125in", paddingTop: 8, paddingBottom: 8 }}>
+      <div className="w-full" style={{ maxWidth: 900, height: "100%", display: "flex", flexDirection: "column" }}>
 
-        <div className="mb-2">
+        <div className="mb-2" style={{ flexShrink: 0 }}>
           <div style={{ color: C.brass, font: `600 10px ${SANS}`, letterSpacing: ".3em" }}>
             RECIPROCITY · THIRD-STOP TICKS
           </div>
@@ -369,17 +370,20 @@ function ExposureWheel() {
           </h1>
         </div>
 
-        <div className="flex flex-wrap gap-2 mb-2">
+        <div className="flex flex-wrap gap-2 mb-2" style={{ flexShrink: 0 }}>
           <ScalePill color={C.silver} label="APERTURE" />
           <ScalePill color={C.brass}  label="SHUTTER" />
           <ScalePill color={C.iso}    label="ISO" />
           <ScalePill color={C.ev}     label="EV" />
         </div>
 
-        <div className="relative select-none mx-auto" style={{ touchAction: "none", width: "min(100%, 72vh)" }}>
-          <svg ref={svgRef} viewBox="-240 -240 480 480" width="100%"
+        <div className="relative select-none mx-auto" style={{
+            touchAction: "none", flex: "1 1 auto", minHeight: 140,
+            display: "flex", justifyContent: "center", width: "100%",
+          }}>
+          <svg ref={svgRef} viewBox="-240 -240 480 480"
             onPointerMove={move} onPointerUp={up} onPointerLeave={up} onPointerCancel={up}
-            style={{ display: "block", filter: "drop-shadow(0 12px 32px rgba(0,0,0,.18))" }}>
+            style={{ display: "block", width: "100%", height: "100%", filter: "drop-shadow(0 12px 32px rgba(0,0,0,.18))" }}>
 
             <circle r={232} fill={C.ink} stroke={C.faint} strokeWidth={1} />
 
@@ -424,7 +428,7 @@ function ExposureWheel() {
         </div>
 
         <div className="flex items-center justify-between mt-2 rounded-2xl p-3"
-          style={{ background: C.ink, border: `1px solid ${C.faint}` }}>
+          style={{ background: C.ink, border: `1px solid ${C.faint}`, flexShrink: 0 }}>
           <button onClick={() => { const n = clamp(apSel - 1, ROT_MIN, ROT_MAX); setApSel(n); syncSliders(n, evSel, evLocked); }} aria-label="rotate down"
             className="w-10 h-10 rounded-full text-lg"
             style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>−</button>
@@ -436,7 +440,7 @@ function ExposureWheel() {
             style={{ background: C.face, color: C.muted, border: `1px solid ${C.faint}` }}>+</button>
         </div>
 
-        <div className="mt-2">
+        <div className="mt-2" style={{ flexShrink: 0 }}>
           <div className="flex justify-center mb-1">
             <div className="rounded-xl px-4 py-1 text-center" style={{ background: C.face, border: `1px solid ${C.faint}` }}>
               <span style={{ color: C.ev, font: `600 12px ${MONO}` }}>
@@ -602,7 +606,7 @@ function ExposureWheel() {
           </div>
         </div>
 
-        <div className="flex gap-3 mt-2">
+        <div className="flex gap-3 mt-2" style={{ flexShrink: 0 }}>
           <div className="flex-1 rounded-2xl p-3" style={{ background: C.ink, border: `1px solid ${C.faint}` }}>
             <div style={{ color: C.muted, font: `600 10px ${SANS}`, letterSpacing: ".18em" }}>SHUTTER</div>
             <div className="flex items-center justify-between mt-1.5">
@@ -629,7 +633,7 @@ function ExposureWheel() {
           </div>
         </div>
 
-        <p style={{ color: C.faint, font: `400 10px ${SANS}` }} className="mt-2 text-center">
+        <p style={{ color: C.faint, font: `400 10px ${SANS}`, flexShrink: 0 }} className="mt-2 text-center">
           After the Cullen Exposure Wheel — for Ted.
         </p>
       </div>
@@ -642,4 +646,3 @@ root.render(<ExposureWheel />);
 </script>
 </body>
 </html>
-
